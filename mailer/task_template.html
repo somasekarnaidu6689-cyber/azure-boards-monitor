@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EOD Task Reminder</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+      background: #f4f5f7;
+      margin: 0;
+      padding: 24px 0;
+      color: #172b4d;
+    }
+    .wrapper {
+      max-width: 600px;
+      margin: 0 auto;
+      background: #ffffff;
+      border-radius: 6px;
+      overflow: hidden;
+      border: 1px solid #dfe1e6;
+    }
+    .header {
+      background: #0052cc;
+      padding: 20px 28px;
+      color: #ffffff;
+    }
+    .header h1 {
+      margin: 0 0 4px 0;
+      font-size: 18px;
+      font-weight: 600;
+    }
+    .header p {
+      margin: 0;
+      font-size: 13px;
+      opacity: 0.85;
+    }
+    .body {
+      padding: 24px 28px;
+    }
+    .greeting {
+      font-size: 14px;
+      margin-bottom: 16px;
+    }
+    .task-card {
+      border: 1px solid #dfe1e6;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .task-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      padding: 12px 16px;
+      background: #fafbfc;
+      border-bottom: 1px solid #dfe1e6;
+    }
+    .task-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: #172b4d;
+      margin: 0 0 2px 0;
+    }
+    .task-meta {
+      font-size: 12px;
+      color: #6b778c;
+    }
+    .risk-badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 3px;
+      white-space: nowrap;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .badge-healthy { background: #e3fcef; color: #006644; }
+    .badge-watch { background: #fffae6; color: #974f0c; }
+    .badge-at-risk { background: #ffebe6; color: #bf2600; }
+    .badge-critical { background: #de350b; color: #ffffff; }
+    .task-body {
+      padding: 12px 16px;
+    }
+    .signals {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .signal-pill {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 20px;
+      background: #f4f5f7;
+      color: #42526e;
+      border: 1px solid #dfe1e6;
+    }
+    .signal-pill.flag { background: #ffebe6; color: #bf2600; border-color: #ffbdad; }
+    .comment-box {
+      background: #f4f5f7;
+      border-left: 3px solid #dfe1e6;
+      padding: 8px 12px;
+      font-size: 13px;
+      color: #42526e;
+      margin-bottom: 10px;
+      border-radius: 0 3px 3px 0;
+    }
+    .comment-box.no-comment {
+      border-left-color: #de350b;
+      color: #de350b;
+      font-style: italic;
+    }
+    .nudge-box {
+      background: #fffae6;
+      border: 1px solid #ffe380;
+      border-radius: 3px;
+      padding: 10px 14px;
+      font-size: 13px;
+      color: #172b4d;
+    }
+    .nudge-box strong {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #974f0c;
+      display: block;
+      margin-bottom: 4px;
+    }
+    .footer {
+      background: #f4f5f7;
+      padding: 16px 28px;
+      font-size: 11px;
+      color: #6b778c;
+      border-top: 1px solid #dfe1e6;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="header">
+      <h1>EOD Task Reminder</h1>
+      <p>Sprint: {{ sprint.name }} &nbsp;|&nbsp; {{ fetched_at_display }}</p>
+    </div>
+
+    <div class="body">
+      <div class="greeting">
+        Hi {{ first_name }}, this task needs your attention before end of day.
+      </div>
+
+      <div class="task-card">
+        <div class="task-header">
+          <div>
+            <div class="task-title">#{{ task.id }} &mdash; {{ task.title }}</div>
+            <div class="task-meta">
+              State: {{ task.state }}
+              {% if task.remaining_hours is not none %}
+              &nbsp;&middot;&nbsp; {{ task.remaining_hours }}h remaining
+              {% endif %}
+            </div>
+          </div>
+          {% set rl = task.risk.risk_label | lower | replace(' ', '-') %}
+          <span class="risk-badge badge-{{ rl }}">{{ task.risk.risk_label }} &mdash; {{ task.risk.risk_score }}</span>
+        </div>
+        <div class="task-body">
+          <div class="signals">
+            {% if not task.analysis.has_comment_today %}
+            <span class="signal-pill flag">No comment today</span>
+            {% endif %}
+            {% if task.analysis.copy_paste_detected %}
+            <span class="signal-pill flag">Copy-pasted comment</span>
+            {% endif %}
+            {% if task.analysis.blocker_detected %}
+            <span class="signal-pill flag">Blocker detected</span>
+            {% endif %}
+            {% if task.risk.signals.hours_stale %}
+            <span class="signal-pill flag">Hours not updated</span>
+            {% endif %}
+            <span class="signal-pill">State unchanged {{ task.risk.signals.days_since_state_change }}d</span>
+            <span class="signal-pill">Comment quality: {{ task.analysis.quality_score }}/10 ({{ task.analysis.quality_label }})</span>
+          </div>
+
+          {% if task.today_comment_text %}
+          <div class="comment-box">
+            <strong style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#6b778c;">Today's comment</strong>
+            {{ task.today_comment_text }}
+          </div>
+          {% else %}
+          <div class="comment-box no-comment">No EOD comment added today.</div>
+          {% endif %}
+
+          {% if task.nudge %}
+          <div class="nudge-box">
+            <strong>Suggested next step ({{ task.nudge.tone }})</strong>
+            {{ task.nudge.message }}
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      Generated automatically by EOD Task Monitor &nbsp;|&nbsp; {{ fetched_at_display }}
+    </div>
+  </div>
+</body>
+</html>
