@@ -16,6 +16,18 @@ class Config:
         f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis"
     )
 
+    # Databricks SQL Warehouse
+    DATABRICKS_SERVER_HOSTNAME = os.getenv("DATABRICKS_SERVER_HOSTNAME")
+    DATABRICKS_HTTP_PATH = os.getenv("DATABRICKS_HTTP_PATH")
+    DATABRICKS_ACCESS_TOKEN = os.getenv("DATABRICKS_ACCESS_TOKEN")
+    DATABRICKS_CATALOG = os.getenv("DATABRICKS_CATALOG", "hive_metastore")
+    DATABRICKS_SCHEMA = os.getenv("DATABRICKS_SCHEMA", "eod_task_monitor")
+
+    # Derived fully-qualified table names
+    @classmethod
+    def db_table(cls, name: str) -> str:
+        return f"{cls.DATABRICKS_CATALOG}.{cls.DATABRICKS_SCHEMA}.{name}"
+
     # Groq
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
@@ -65,6 +77,18 @@ class Config:
     # via System.LinkTypes.Hierarchy-Forward.
     ALLOWED_WORK_ITEM_TYPES = ["Task"]
 
+    # Databricks SQL Warehouse
+    DATABRICKS_SERVER_HOSTNAME = os.getenv("DATABRICKS_SERVER_HOSTNAME")
+    DATABRICKS_HTTP_PATH = os.getenv("DATABRICKS_HTTP_PATH")
+    DATABRICKS_ACCESS_TOKEN = os.getenv("DATABRICKS_ACCESS_TOKEN")
+    DATABRICKS_CATALOG = os.getenv("DATABRICKS_CATALOG", "hive_metastore")
+    DATABRICKS_SCHEMA = os.getenv("DATABRICKS_SCHEMA", "eod_task_monitor")
+
+    @classmethod
+    def db_table(cls, name: str) -> str:
+        """Return fully-qualified Databricks table name: catalog.schema.table"""
+        return f"{cls.DATABRICKS_CATALOG}.{cls.DATABRICKS_SCHEMA}.{name}"
+
     @classmethod
     def validate(cls):
         required = [
@@ -76,6 +100,9 @@ class Config:
             ("SMTP_PASSWORD", cls.SMTP_PASSWORD),
             ("EMAIL_FROM", cls.EMAIL_FROM),
             ("EMAIL_TO", cls.EMAIL_TO),
+            ("DATABRICKS_SERVER_HOSTNAME", cls.DATABRICKS_SERVER_HOSTNAME),
+            ("DATABRICKS_HTTP_PATH", cls.DATABRICKS_HTTP_PATH),
+            ("DATABRICKS_ACCESS_TOKEN", cls.DATABRICKS_ACCESS_TOKEN),
         ]
         missing = [name for name, val in required if not val]
         if missing:

@@ -16,6 +16,8 @@ from utils.logger import setup_logging
 from fetcher.board_fetcher import fetch_active_sprint_tasks
 from agents.pipeline import run_pipeline
 from mailer.sender import send_report, send_individual_task_emails
+from storage.schema import init_schema
+from storage.writer import save_report
 
 setup_logging("INFO")
 logger = logging.getLogger(__name__)
@@ -23,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 def run_once() -> None:
     logger.info("=== EOD Task Monitor starting ===")
+
+    logger.info("Step 0 / 3 — Initialising Databricks schema...")
+    init_schema()
 
     logger.info("Step 1 / 3 — Fetching active sprint board data from Azure DevOps...")
     board_data = fetch_active_sprint_tasks()
@@ -59,7 +64,8 @@ def run_once() -> None:
         summary["tasks_with_blockers"],
     )
 
-    logger.info("Step 3 / 3 — Sending email report(s)...")
+    logger.info("Step 3 / 3 — Saving snapshot to Databricks and sending email report(s)...")
+    save_report(report)
     send_report(report)
     send_individual_task_emails(report)
 
