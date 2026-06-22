@@ -109,3 +109,52 @@ Two kinds of emails are sent each run:
 ## Risk label override for missing comments
 
 A task with no EOD comment today always gets at least a "Watch" label, even if its weighted risk score would otherwise round to "Healthy" (0-30). This prevents a task with zero visibility into its status from appearing healthy in the report. The numeric `risk_score` itself is unchanged; only the displayed `risk_label` is adjusted.
+
+## Performance optimisations
+
+The initial version of the pipeline took approximately 2 minutes to process 4 tasks. After profiling and targeted fixes, the same run completes in 59 seconds — a 55.30% reduction in execution time (123.73% speed gain). The bottlenecks and what was done about each:
+
+### Problem 1: sequential comment fetching
+
+The original code fetched comments one task at a time inside a `for` loop. Each HTTP call to the Azure DevOps comments API takes 500ms–1.5s, so N tasks meant N × that wait time back to back.
+
+Fix: `get_comments_for_all_tasks()` in `azure_client.py` uses `ThreadPoolExecutor` with up to 20 workers to fire all comment requests concurrently. All tasks' comments are fetched in roughly the time it takes to fetch one.
+
+```
+Before: 4 tasks × ~1.5s = 6s sequential
+After:  4 tasks in parallel ≈ 1.5s total
+```
+
+### Problem 2: sequential oneHop child ID queries
+
+For each parent User Story, a separate WIQL `oneHop` query was fired one after another to find child Task IDs.
+
+Fix: `get_task_ids_in_sprint()` now submits all parent queries to a `ThreadPoolExecutor` simultaneously, collecting results as they complete.
+
+### Problem 3: new TCP connection per API call
+
+Every `requests.get()` / `requests.post()` call was creating a fresh HTTP connection, paying the TCP + TLS handshake cost (~50–100ms) every single time.
+
+Fix: a single `requests.Session` is created once and reused for the entire run. The session keeps connections alive and reuses them across all Azure DevOps calls.
+
+### Problem 4: one Databricks MERGE per row, across 6 tables
+
+The original storage layer had 6 tables (4 dimension + 2 fact) and executed one `MERGE` SQL statement per task per table — 30+ round trips to Databricks just for 4 tasks. Each round trip adds network latency and warehouse startup overhead.
+
+Fix: collapsed to a single flat table `TaskDailySnapshot` (one row per task per day, all fields in one place). The write is now two SQL statements regardless of task count: one `DELETE` to remove today's rows (idempotency), then one `executemany` INSERT that sends all rows in a single batch.
+
+```
+Before: 6 tables × 4 tasks × ~5s per MERGE = ~120s
+After:  DELETE + executemany = 2 round trips ≈ 5–8s total
+```
+
+### Summary
+
+| Optimisation | Technique | Where |
+|---|---|---|
+| Parallel comment fetch | `ThreadPoolExecutor`, 20 workers | `azure_client.py` |
+| Parallel child ID fetch | `ThreadPoolExecutor`, per parent | `azure_client.py` |
+| HTTP connection reuse | `requests.Session` shared across all calls | `azure_client.py` |
+| Bulk Databricks write | Single `executemany` INSERT, 1 flat table | `storage/writer.py` |
+
+Measured result on 4 tasks: **~130s → 59s (55% faster)**. The gains compound as task count grows — comment fetching and child ID queries scale O(1) with parallelism instead of O(N).
