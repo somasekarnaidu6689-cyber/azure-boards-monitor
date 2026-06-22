@@ -162,6 +162,18 @@ def send_individual_task_emails(report: dict) -> None:
     skipped_no_email = 0
 
     for task in flagged_tasks:
+        task_state = task.get("state", "").strip().lower()
+
+        if task_state not in Config.EMAIL_NOTIFY_STATES:
+            logger.info(
+                "Task #%d ('%s') state '%s' is not in EMAIL_NOTIFY_STATES %s — skipping individual email.",
+                task["id"],
+                task["title"],
+                task.get("state", ""),
+                Config.EMAIL_NOTIFY_STATES,
+            )
+            continue
+
         assignee_email = task["assignee"].get("email", "").strip()
 
         if not assignee_email:
