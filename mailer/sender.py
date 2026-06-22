@@ -112,22 +112,59 @@ def _send_smtp_email(
 
     logger.info("Email sent successfully to %s.", to_addresses)
 
-
 def send_report(report: dict) -> None:
     """
     Render the full HTML report and send it via SMTP to all addresses in
     Config.EMAIL_TO.
+
+    Only tasks whose state is in EMAIL_NOTIFY_STATES are included in the
+    report. Tasks in other states (e.g. Closed) are silently excluded.
     """
-    html_body = _render_report_html(report)
+    # Filter tasks to only the states configured for email reporting
+    all_tasks = report["tasks"]
+    notify_states = {s.strip().lower() for s in Config.EMAIL_NOTIFY_STATES}
+
+    filtered_tasks = [
+        t for t in all_tasks
+        if t.get("state", "").strip().lower() in notify_states
+    ]
+
+    if not filtered_tasks:
+        logger.info(
+            "No tasks in states %s — skipping full report email.",
+            Config.EMAIL_NOTIFY_STATES,
+        )
+        return
+
+    # Build a filtered copy of the report so the template
+    # summary counts also reflect the filtered task list
+    filtered_flagged  = [t for t in filtered_tasks if t["needs_attention"]]
+    filtered_healthy  = [t for t in filtered_tasks if not t["needs_attention"]]
+
+    filtered_report = {
+        **report,
+        "tasks": filtered_tasks,
+        "summary": {
+            "total_tasks":             len(filtered_tasks),
+            "flagged_tasks":           len(filtered_flagged),
+            "healthy_tasks":           len(filtered_healthy),
+            "tasks_missing_comment":   sum(1 for t in filtered_tasks if not t["analysis"]["has_comment_today"]),
+            "tasks_with_blockers":     sum(1 for t in filtered_tasks if t["analysis"]["blocker_detected"]),
+            "tasks_at_risk_or_critical": sum(1 for t in filtered_tasks if t["risk"]["risk_label"] in ("At Risk", "Critical")),
+        },
+    }
+
+    html_body = _render_report_html(filtered_report)
 
     sprint_name = report["sprint"].get("name", "Sprint")
     today_str = datetime.now(timezone.utc).strftime("%d %b %Y")
     subject = f"EOD Task Report - {sprint_name} - {today_str}"
 
-    total = report["summary"]["total_tasks"]
-    flagged = report["summary"]["flagged_tasks"]
+    total   = filtered_report["summary"]["total_tasks"]
+    flagged = filtered_report["summary"]["flagged_tasks"]
     plain = (
         f"EOD Task Report for {sprint_name} ({today_str})\n\n"
+        f"Reporting on states: {', '.join(Config.EMAIL_NOTIFY_STATES)}\n"
         f"Total tasks: {total}\n"
         f"Needs attention: {flagged}\n"
         f"Healthy: {total - flagged}\n\n"
@@ -135,7 +172,6 @@ def send_report(report: dict) -> None:
     )
 
     _send_smtp_email(Config.EMAIL_TO, subject, plain, html_body)
-
 
 def send_individual_task_emails(report: dict) -> None:
     """
