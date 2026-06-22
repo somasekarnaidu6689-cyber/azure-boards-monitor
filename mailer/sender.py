@@ -195,9 +195,9 @@ def send_individual_task_emails(report: dict) -> None:
         return
 
     email_to_lower = {addr.strip().lower() for addr in Config.EMAIL_TO}
-    notify_states = {s.strip().lower() for s in Config.EMAIL_NOTIFY_STATES}
     quality_gate_state = Config.EMAIL_QUALITY_GATE_STATE.strip().lower()
     good_threshold = Config.EMAIL_GOOD_QUALITY_THRESHOLD
+    notify_states = {s.strip().lower() for s in Config.EMAIL_NOTIFY_STATES} | {quality_gate_state}
 
     sent_count = 0
     skipped_no_email = 0
