@@ -2,6 +2,7 @@ import base64
 import logging
 import re
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -9,20 +10,56 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
+# ── Shared session — reuses TCP connections across all calls ─────────────────
+_session: Optional[requests.Session] = None
+
+
+def _get_session() -> requests.Session:
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        token = base64.b64encode(f":{Config.AZURE_PAT}".encode()).decode()
+        _session.headers.update({
+            "Authorization": f"Basic {token}",
+            "Content-Type": "application/json",
+        })
+    return _session
+
+
+def _get(url: str, params: Optional[dict] = None) -> dict:
+    response = _get_session().get(url, params=params, timeout=30)
+    response.raise_for_status()
+    return response.json()
+
+
+def _post(url: str, body: dict) -> dict:
+    response = _get_session().post(url, json=body, timeout=30)
+    response.raise_for_status()
+    return response.json()
+
+
+# ── HTML utilities ───────────────────────────────────────────────────────────
+
+def _extract_image_urls(html: str) -> list[str]:
+    """
+    Extract all image URLs from HTML comment text before stripping tags.
+    Captures src attributes of <img> tags.
+    Returns a list of URL strings (empty list if none).
+    """
+    if not html:
+        return []
+    return re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html, flags=re.IGNORECASE)
+
 
 def _strip_html(text: str) -> str:
     """
-    Azure DevOps comments are returned as HTML (e.g. '<div>testing phase</div>').
-    Strip tags and collapse whitespace to get plain text for LLM/embedding input.
+    Strip HTML tags and decode entities to produce plain text for LLM input.
     """
     if not text:
         return ""
-    # Replace common block-level tags with newlines before stripping
     text = re.sub(r"</(div|p|li|br)\s*>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-    # Strip all remaining tags
     text = re.sub(r"<[^>]+>", "", text)
-    # Decode common HTML entities
     text = (
         text.replace("&nbsp;", " ")
         .replace("&amp;", "&")
@@ -31,66 +68,34 @@ def _strip_html(text: str) -> str:
         .replace("&quot;", '"')
         .replace("&#39;", "'")
     )
-    # Collapse whitespace
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n\s*\n+", "\n", text)
     return text.strip()
 
 
-def _auth_header() -> dict:
-    token = base64.b64encode(f":{Config.AZURE_PAT}".encode()).decode()
-    return {
-        "Authorization": f"Basic {token}",
-        "Content-Type": "application/json",
-    }
-
-
-def _get(url: str, params: Optional[dict] = None) -> dict:
-    response = requests.get(url, headers=_auth_header(), params=params, timeout=30)
-    response.raise_for_status()
-    return response.json()
-
-
-def _post(url: str, body: dict) -> dict:
-    response = requests.post(url, headers=_auth_header(), json=body, timeout=30)
-    response.raise_for_status()
-    return response.json()
-
+# ── Sprint ───────────────────────────────────────────────────────────────────
 
 def get_active_sprint() -> dict:
-    """
-    Fetch the currently active sprint (iteration) for the configured team.
-    Returns the sprint object with id, name, path, attributes (startDate,
-    finishDate, timeFrame).
-    """
     url = (
         f"https://dev.azure.com/{Config.AZURE_ORG}/{Config.AZURE_PROJECT}"
         f"/{Config.AZURE_TEAM}/_apis/work/teamsettings/iterations"
     )
-    params = {
-        "$timeframe": "current",
-        "api-version": "7.1",
-    }
+    params = {"$timeframe": "current", "api-version": "7.1"}
     data = _get(url, params)
     iterations = data.get("value", [])
     if not iterations:
         raise RuntimeError(
-            "No active sprint found for team "
-            f"'{Config.AZURE_TEAM}' in project '{Config.AZURE_PROJECT}'"
+            f"No active sprint found for team '{Config.AZURE_TEAM}' "
+            f"in project '{Config.AZURE_PROJECT}'"
         )
-    # The API returns only current when $timeframe=current
     return iterations[0]
 
 
+# ── Work item discovery ──────────────────────────────────────────────────────
+
 def get_parent_story_ids_in_sprint(iteration_path: str) -> list[int]:
-    """
-    Find all parent work items (e.g. User Stories) in the active sprint.
-    These are the "container" items whose child Tasks we actually care about.
-    """
     url = f"{Config.AZURE_BASE_URL}/wit/wiql?api-version=7.1"
-
     parent_types = ", ".join(f"'{t}'" for t in Config.PARENT_WORK_ITEM_TYPES)
-
     wiql = {
         "query": (
             "SELECT [System.Id], [System.Title], [System.WorkItemType], "
@@ -106,14 +111,9 @@ def get_parent_story_ids_in_sprint(iteration_path: str) -> list[int]:
     return [item["id"] for item in data.get("workItems", [])]
 
 
-def get_child_task_ids(parent_id: int) -> list[int]:
-    """
-    Run a 'oneHop' WIQL query to find all child work items linked to the
-    given parent via System.LinkTypes.Hierarchy-Forward. Returns the IDs
-    of the child work items (the "target" side of each relation).
-    """
+def _fetch_child_ids_for_parent(parent_id: int) -> list[int]:
+    """Fetch child task IDs for a single parent — used inside thread pool."""
     url = f"{Config.AZURE_BASE_URL}/wit/wiql?api-version=7.1"
-
     wiql = {
         "query": (
             "SELECT [System.Id] FROM WorkItemLinks "
@@ -124,63 +124,47 @@ def get_child_task_ids(parent_id: int) -> list[int]:
     }
     data = _post(url, wiql)
     relations = data.get("workItemRelations", [])
-
-    child_ids = []
-    for rel in relations:
-        # The first relation in the result has rel=None and represents the
-        # source item itself (target == parent_id) -- skip it.
-        if rel.get("rel") is None:
-            continue
-        target = rel.get("target")
-        if target and target.get("id"):
-            child_ids.append(target["id"])
-
-    return child_ids
+    return [
+        rel["target"]["id"]
+        for rel in relations
+        if rel.get("rel") is not None and rel.get("target")
+    ]
 
 
 def get_task_ids_in_sprint(iteration_path: str) -> list[int]:
     """
-    Two-step lookup:
-    1. Find all parent items (e.g. User Stories) in the active sprint.
-    2. For each parent, find its child Task work items via hierarchy links.
-
-    Returns a deduplicated, sorted list of child Task IDs whose
-    WorkItemType is in Config.ALLOWED_WORK_ITEM_TYPES. The type filter is
-    applied later in board_fetcher.py once full work item details are
-    fetched, since the oneHop query only returns IDs.
+    Two-step lookup with parallel child fetching:
+    1. Find all parent items in the sprint (single WIQL call).
+    2. Fetch child IDs for all parents in parallel (ThreadPoolExecutor).
     """
     parent_ids = get_parent_story_ids_in_sprint(iteration_path)
     logger.info("Found %d parent work item(s) in sprint", len(parent_ids))
 
     all_child_ids: set[int] = set()
-    for parent_id in parent_ids:
-        child_ids = get_child_task_ids(parent_id)
-        all_child_ids.update(child_ids)
+
+    with ThreadPoolExecutor(max_workers=min(10, len(parent_ids) or 1)) as pool:
+        futures = {pool.submit(_fetch_child_ids_for_parent, pid): pid for pid in parent_ids}
+        for future in as_completed(futures):
+            try:
+                all_child_ids.update(future.result())
+            except Exception as exc:
+                logger.warning("Child fetch failed for parent %d: %s", futures[future], exc)
 
     return sorted(all_child_ids)
 
 
 def get_work_item_details(work_item_ids: list[int]) -> list[dict]:
     """
-    Batch-fetch full details for the given work item IDs.
-    Returns list of work item detail dicts.
-
-    Note: we do NOT pass a 'fields' filter here. Some process templates
-    (e.g. Agile "User Story") don't support fields like
-    Microsoft.VSTS.Scheduling.RemainingWork, and Azure DevOps returns a
-    400 Bad Request if an unsupported field is requested. Fetching all
-    fields and extracting what we need downstream (board_fetcher.py) is
-    more robust across process templates.
+    Batch-fetch work item details in chunks of 200 (single call per chunk).
+    No fields filter — avoids 400s from missing fields in some process templates.
     """
     if not work_item_ids:
         return []
 
-    # Azure DevOps batch API accepts up to 200 IDs at a time
     results = []
     chunk_size = 200
-
     for i in range(0, len(work_item_ids), chunk_size):
-        chunk = work_item_ids[i : i + chunk_size]
+        chunk = work_item_ids[i: i + chunk_size]
         ids_str = ",".join(str(wid) for wid in chunk)
         url = f"{Config.AZURE_BASE_URL}/wit/workitems?ids={ids_str}&api-version=7.1"
         data = _get(url)
@@ -189,11 +173,13 @@ def get_work_item_details(work_item_ids: list[int]) -> list[dict]:
     return results
 
 
-def get_comments_for_work_item(work_item_id: int) -> list[dict]:
+# ── Comments — parallel fetch ────────────────────────────────────────────────
+
+def _fetch_comments_for_one(work_item_id: int) -> tuple[int, list[dict]]:
     """
-    Fetch all comments for a work item and return only those added
-    within the last COMMENT_LOOKBACK_DAYS days (section 6, Agent 1 spec).
-    Each comment includes: id, text, createdBy email, createdDate.
+    Fetch and filter comments for a single work item.
+    Returns (work_item_id, comments_list).
+    Used inside ThreadPoolExecutor.
     """
     url = (
         f"{Config.AZURE_BASE_URL}/wit/workItems/{work_item_id}"
@@ -210,21 +196,49 @@ def get_comments_for_work_item(work_item_id: int) -> list[dict]:
         created_str = c.get("createdDate", "")
         if not created_str:
             continue
-        # Azure returns ISO 8601 with trailing Z
         created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-        if created_dt >= cutoff:
-            author = c.get("createdBy", {})
-            filtered.append(
-                {
-                    "comment_id": c.get("id"),
-                    "text": _strip_html(c.get("text", "")),
-                    "author_display_name": author.get("displayName", ""),
-                    "author_email": author.get("uniqueName", ""),
-                    "created_date": created_dt.isoformat(),
-                    "is_today": created_dt.date() == today,
-                }
-            )
+        if created_dt < cutoff:
+            continue
 
-    # Most recent first
+        raw_html = c.get("text", "")
+        author = c.get("createdBy", {})
+        filtered.append({
+            "comment_id": c.get("id"),
+            "text": _strip_html(raw_html),
+            "image_urls": _extract_image_urls(raw_html),   # new: extracted before stripping
+            "author_display_name": author.get("displayName", ""),
+            "author_email": author.get("uniqueName", ""),
+            "created_date": created_dt.isoformat(),
+            "is_today": created_dt.date() == today,
+        })
+
     filtered.sort(key=lambda x: x["created_date"], reverse=True)
-    return filtered
+    return work_item_id, filtered
+
+
+def get_comments_for_all_tasks(work_item_ids: list[int]) -> dict[int, list[dict]]:
+    """
+    Fetch comments for ALL work items in parallel.
+    Returns dict of work_item_id -> list of comment dicts.
+    """
+    results: dict[int, list[dict]] = {}
+    max_workers = min(20, len(work_item_ids) or 1)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_fetch_comments_for_one, wid): wid for wid in work_item_ids}
+        for future in as_completed(futures):
+            wid = futures[future]
+            try:
+                item_id, comments = future.result()
+                results[item_id] = comments
+            except Exception as exc:
+                logger.warning("Comment fetch failed for work item %d: %s", wid, exc)
+                results[wid] = []
+
+    return results
+
+
+# Keep the old single-item function for backward compat with any other callers
+def get_comments_for_work_item(work_item_id: int) -> list[dict]:
+    _, comments = _fetch_comments_for_one(work_item_id)
+    return comments

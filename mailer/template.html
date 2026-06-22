@@ -38,12 +38,14 @@
     .body {
       padding: 24px 32px;
     }
-    .summary-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 12px;
-      margin-bottom: 28px;
+    .summary-grid { 
+      display: grid; 
+      grid-template-columns: repeat(2, 1fr); 
+      grid-template-rows: repeat(2, auto);    
+      gap: 12px; 
+      margin-bottom: 28px; 
     }
+
     .summary-card {
       background: #f4f5f7;
       border-radius: 4px;
@@ -125,6 +127,7 @@
     .signal-pill {
       font-size: 11px;
       padding: 2px 8px;
+      margin-right: 4px;
       border-radius: 20px;
       background: #f4f5f7;
       color: #42526e;
@@ -200,14 +203,6 @@
           <div class="number red">{{ summary.tasks_missing_comment }}</div>
           <div class="label">No EOD Comment</div>
         </div>
-        <div class="summary-card">
-          <div class="number amber">{{ summary.tasks_with_blockers }}</div>
-          <div class="label">Blockers</div>
-        </div>
-        <div class="summary-card">
-          <div class="number amber">{{ summary.tasks_at_risk_or_critical }}</div>
-          <div class="label">At Risk / Critical</div>
-        </div>
       </div>
 
       <!-- Flagged tasks -->
@@ -217,7 +212,7 @@
       <div class="task-card">
         <div class="task-header">
           <div>
-            <div class="task-title">#{{ task.id }} &mdash; {{ task.title }}</div>
+            <div class="task-title">#{{ task.id }} : {{ task.title }}</div>
             <div class="task-meta">
               {{ task.assignee.display_name }}
               &nbsp;&middot;&nbsp; State: {{ task.state }}
@@ -227,7 +222,7 @@
             </div>
           </div>
           {% set rl = task.risk.risk_label | lower | replace(' ', '-') %}
-          <span class="risk-badge badge-{{ rl }}">{{ task.risk.risk_label }} &mdash; {{ task.risk.risk_score }}</span>
+          <span class="risk-badge badge-{{ rl }}">{{ task.risk.risk_label }} - {{ task.risk.risk_score }}</span>
         </div>
         <div class="task-body">
           <!-- Signal pills -->
