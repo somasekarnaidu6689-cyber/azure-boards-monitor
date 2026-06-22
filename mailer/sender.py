@@ -175,13 +175,15 @@ def send_report(report: dict) -> None:
 
 def send_individual_task_emails(report: dict) -> None:
     """
-    For every flagged task that has an assignee email (System.AssignedTo
-    -> uniqueName), send a focused single-task reminder email directly to
-    that person.
+    Send a focused single-task reminder email to each flagged task's assignee.
 
-    Tasks with no assignee email, or whose assignee email is also present
-    in Config.EMAIL_TO (to avoid duplicate sends to the same address), are
-    skipped.
+    Quality gate logic (EMAIL_QUALITY_GATE_STATE):
+      - If a task's state matches EMAIL_QUALITY_GATE_STATE (e.g. "Active"),
+        the individual email is ONLY sent when the comment quality score is
+        below EMAIL_GOOD_QUALITY_THRESHOLD.
+      - If quality is already good (score >= threshold), the assignee is not
+        emailed — there is nothing to nudge them about.
+      - Tasks in other states follow the normal EMAIL_NOTIFY_STATES filter.
     """
     sprint_name = report["sprint"].get("name", "Sprint")
     today_str = datetime.now(timezone.utc).strftime("%d %b %Y")
@@ -189,47 +191,74 @@ def send_individual_task_emails(report: dict) -> None:
     flagged_tasks = [t for t in report["tasks"] if t["needs_attention"]]
 
     if not flagged_tasks:
-        logger.info("No flagged tasks - skipping individual task emails.")
+        logger.info("No flagged tasks — skipping individual task emails.")
         return
 
     email_to_lower = {addr.strip().lower() for addr in Config.EMAIL_TO}
+    notify_states = {s.strip().lower() for s in Config.EMAIL_NOTIFY_STATES}
+    quality_gate_state = Config.EMAIL_QUALITY_GATE_STATE.strip().lower()
+    good_threshold = Config.EMAIL_GOOD_QUALITY_THRESHOLD
 
     sent_count = 0
     skipped_no_email = 0
+    skipped_good_quality = 0
+    skipped_state = 0
 
     for task in flagged_tasks:
         task_state = task.get("state", "").strip().lower()
+        quality_score = task["analysis"].get("quality_score", 0)
+        has_comment = task["analysis"].get("has_comment_today", False)
 
-        if task_state not in Config.EMAIL_NOTIFY_STATES:
+        # ── State filter: skip states not in EMAIL_NOTIFY_STATES ──────────
+        if task_state not in notify_states:
             logger.info(
-                "Task #%d ('%s') state '%s' is not in EMAIL_NOTIFY_STATES %s — skipping individual email.",
-                task["id"],
-                task["title"],
-                task.get("state", ""),
-                Config.EMAIL_NOTIFY_STATES,
+                "Task #%d ('%s') state '%s' not in EMAIL_NOTIFY_STATES %s — skipping.",
+                task["id"], task["title"], task.get("state"), Config.EMAIL_NOTIFY_STATES,
             )
+            skipped_state += 1
             continue
 
+        # ── Quality gate: only applies to EMAIL_QUALITY_GATE_STATE ────────
+        if task_state == quality_gate_state:
+            if has_comment and quality_score >= good_threshold:
+                logger.info(
+                    "Task #%d ('%s') [%s] quality score %d/10 meets threshold %d — "
+                    "comment is good enough, skipping individual email.",
+                    task["id"], task["title"], task.get("state"),
+                    quality_score, good_threshold,
+                )
+                skipped_good_quality += 1
+                continue
+            else:
+                reason = (
+                    f"quality score {quality_score}/10 below threshold {good_threshold}"
+                    if has_comment else "no comment today"
+                )
+                logger.info(
+                    "Task #%d ('%s') [%s] — sending individual email (%s).",
+                    task["id"], task["title"], task.get("state"), reason,
+                )
+
+        # ── Assignee email check ───────────────────────────────────────────
         assignee_email = task["assignee"].get("email", "").strip()
 
         if not assignee_email:
             logger.warning(
-                "Task #%d ('%s') has no assignee email - skipping individual notification.",
-                task["id"],
-                task["title"],
+                "Task #%d ('%s') has no assignee email — skipping individual notification.",
+                task["id"], task["title"],
             )
             skipped_no_email += 1
             continue
 
         if assignee_email.lower() in email_to_lower:
             logger.info(
-                "Task #%d assignee email '%s' is already in EMAIL_TO - "
-                "skipping individual email to avoid duplicate.",
-                task["id"],
-                assignee_email,
+                "Task #%d assignee email '%s' is already in EMAIL_TO — "
+                "skipping to avoid duplicate.",
+                task["id"], assignee_email,
             )
             continue
 
+        # ── Send ──────────────────────────────────────────────────────────
         html_body = _render_task_html(report, task)
 
         subject = (
@@ -243,8 +272,13 @@ def send_individual_task_emails(report: dict) -> None:
             f"Your task #{task['id']} '{task['title']}' needs attention "
             f"(risk: {task['risk']['risk_label']}, score: {task['risk']['risk_score']}).\n\n"
         )
-        if not task["analysis"]["has_comment_today"]:
+        if not has_comment:
             plain += "No EOD comment was added today.\n\n"
+        elif quality_score < good_threshold:
+            plain += (
+                f"Today's comment scored {quality_score}/10 — "
+                f"a more detailed update would help the team track progress.\n\n"
+            )
         if task.get("nudge"):
             plain += f"Suggested next step: {task['nudge']['message']}\n\n"
         plain += "Open the HTML version of this email for full details."
@@ -253,7 +287,7 @@ def send_individual_task_emails(report: dict) -> None:
         sent_count += 1
 
     logger.info(
-        "Individual task emails: %d sent, %d skipped (no assignee email).",
-        sent_count,
-        skipped_no_email,
+        "Individual task emails: %d sent | %d skipped (state) | "
+        "%d skipped (good quality) | %d skipped (no assignee email).",
+        sent_count, skipped_state, skipped_good_quality, skipped_no_email,
     )

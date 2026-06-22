@@ -38,12 +38,14 @@ class Config:
     SMTP_USER = os.getenv("SMTP_USER")
     SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
     EMAIL_FROM = os.getenv("EMAIL_FROM")
-    EMAIL_TO = [e.strip() for e in os.getenv("EMAIL_TO", "").split(",") if e.strip()]
-    EMAIL_NOTIFY_STATES = [
-    s.strip().lower()
-    for s in os.getenv("EMAIL_NOTIFY_STATES", "New,Active,Resolved").split(",")
-    if s.strip()
-]
+        EMAIL_TO = [e.strip() for e in os.getenv("EMAIL_TO", "").split(",") if e.strip()]
+        EMAIL_NOTIFY_STATES = [
+        s.strip().lower()
+        for s in os.getenv("EMAIL_NOTIFY_STATES", "New,Active,Resolved").split(",")
+        if s.strip()
+    ]
+    EMAIL_QUALITY_GATE_STATE = os.getenv("EMAIL_QUALITY_GATE_STATE", "Active").strip().lower()
+    EMAIL_GOOD_QUALITY_THRESHOLD = int(os.getenv("EMAIL_GOOD_QUALITY_THRESHOLD", 7))
 
     # Scheduler
     RUN_HOUR = int(os.getenv("RUN_HOUR", 18))

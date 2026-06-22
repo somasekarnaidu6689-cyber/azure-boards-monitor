@@ -110,7 +110,27 @@ Two kinds of emails are sent each run:
 
 A task with no EOD comment today always gets at least a "Watch" label, even if its weighted risk score would otherwise round to "Healthy" (0-30). This prevents a task with zero visibility into its status from appearing healthy in the report. The numeric `risk_score` itself is unchanged; only the displayed `risk_label` is adjusted.
 
-## Performance optimisations
+## EOD comment quality guide
+
+The AI evaluates each comment on three things: what was done, what is left, and any risks or blockers. A score of 7 or above (out of 10) is considered good enough to stop sending individual reminder emails for tasks in `EMAIL_QUALITY_GATE_STATE`.
+
+### Example comment that passes the threshold
+
+> Completed the API integration for the payment gateway module — handled success and failure response codes, added retry logic for timeout errors. Remaining work is writing unit tests for the edge cases (estimated 2–3 hours). No blockers currently. Will push the PR tomorrow morning.
+
+This scores high because it covers every signal the evaluator checks: a specific description of what was done, a concrete remaining task with a time estimate, an explicit blocker status, and a clear next step with a timeline.
+
+### Why other comments fail
+
+| Comment | Score | Reason |
+|---|---|---|
+| "done" | 0–1 | Matches vague phrase list, no substance |
+| "in progress" | 1–2 | No specifics on what or how much |
+| "working on it, almost done" | 2–3 | No what, no how, no when |
+| "Fixed the bug" | 3–5 | No context on which bug, what is left |
+| "Completed most of the work, will finish tomorrow" | 5–6 | No specifics on what was completed or what remains |
+
+The threshold is set at 7 and not 10 deliberately — the developer does not need to write an essay, they just need to give the team enough information to not require a follow-up question the next morning.
 
 The initial version of the pipeline took approximately 2 minutes to process 4 tasks. After profiling and targeted fixes, the same run completes in 59 seconds — a 55.30% reduction in execution time (123.73% speed gain). The bottlenecks and what was done about each:
 
