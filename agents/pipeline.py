@@ -150,8 +150,7 @@ def run_pipeline(board_data: dict) -> dict:
             else:
                 # 2+ days ago — grace period expired, run analysis normally
                 logger.info(
-                    "Task #%d last good comment was %d day(s) ago (%s, score %d) — "
-                    "grace period expired, running analysis.",
+                    "Task #%d latest comment on %s is good (score %d) - running analysis:",
                     task_id, rec["latest_date"], rec["latest_score"],
                 )
 
