@@ -112,59 +112,22 @@ def _send_smtp_email(
 
     logger.info("Email sent successfully to %s.", to_addresses)
 
+
 def send_report(report: dict) -> None:
     """
     Render the full HTML report and send it via SMTP to all addresses in
     Config.EMAIL_TO.
-
-    Only tasks whose state is in EMAIL_NOTIFY_STATES are included in the
-    report. Tasks in other states (e.g. Closed) are silently excluded.
     """
-    # Filter tasks to only the states configured for email reporting
-    all_tasks = report["tasks"]
-    notify_states = {s.strip().lower() for s in Config.EMAIL_NOTIFY_STATES}
-
-    filtered_tasks = [
-        t for t in all_tasks
-        if t.get("state", "").strip().lower() in notify_states
-    ]
-
-    if not filtered_tasks:
-        logger.info(
-            "No tasks in states %s — skipping full report email.",
-            Config.EMAIL_NOTIFY_STATES,
-        )
-        return
-
-    # Build a filtered copy of the report so the template
-    # summary counts also reflect the filtered task list
-    filtered_flagged  = [t for t in filtered_tasks if t["needs_attention"]]
-    filtered_healthy  = [t for t in filtered_tasks if not t["needs_attention"]]
-
-    filtered_report = {
-        **report,
-        "tasks": filtered_tasks,
-        "summary": {
-            "total_tasks":             len(filtered_tasks),
-            "flagged_tasks":           len(filtered_flagged),
-            "healthy_tasks":           len(filtered_healthy),
-            "tasks_missing_comment":   sum(1 for t in filtered_tasks if not t["analysis"]["has_comment_today"]),
-            "tasks_with_blockers":     sum(1 for t in filtered_tasks if t["analysis"]["blocker_detected"]),
-            "tasks_at_risk_or_critical": sum(1 for t in filtered_tasks if t["risk"]["risk_label"] in ("At Risk", "Critical")),
-        },
-    }
-
-    html_body = _render_report_html(filtered_report)
+    html_body = _render_report_html(report)
 
     sprint_name = report["sprint"].get("name", "Sprint")
     today_str = datetime.now(timezone.utc).strftime("%d %b %Y")
     subject = f"EOD Task Report - {sprint_name} - {today_str}"
 
-    total   = filtered_report["summary"]["total_tasks"]
-    flagged = filtered_report["summary"]["flagged_tasks"]
+    total = report["summary"]["total_tasks"]
+    flagged = report["summary"]["flagged_tasks"]
     plain = (
         f"EOD Task Report for {sprint_name} ({today_str})\n\n"
-        f"Reporting on states: {', '.join(Config.EMAIL_NOTIFY_STATES)}\n"
         f"Total tasks: {total}\n"
         f"Needs attention: {flagged}\n"
         f"Healthy: {total - flagged}\n\n"
@@ -173,17 +136,20 @@ def send_report(report: dict) -> None:
 
     _send_smtp_email(Config.EMAIL_TO, subject, plain, html_body)
 
+
 def send_individual_task_emails(report: dict) -> None:
     """
     Send a focused single-task reminder email to each flagged task's assignee.
 
     Quality gate logic (EMAIL_QUALITY_GATE_STATE):
-      - If a task's state matches EMAIL_QUALITY_GATE_STATE (e.g. "Active"),
-        the individual email is ONLY sent when the comment quality score is
-        below EMAIL_GOOD_QUALITY_THRESHOLD.
-      - If quality is already good (score >= threshold), the assignee is not
-        emailed — there is nothing to nudge them about.
-      - Tasks in other states follow the normal EMAIL_NOTIFY_STATES filter.
+      Tasks in this state only get an individual email if ANY of:
+        - No comment was added today
+        - Comment quality score < EMAIL_GOOD_QUALITY_THRESHOLD
+        - Comment was flagged as copy-pasted (regardless of score)
+      Once a task in this state has a genuine, non-copy-pasted comment
+      scoring >= threshold, no email is sent.
+
+    Tasks in other notify states follow the normal flow.
     """
     sprint_name = report["sprint"].get("name", "Sprint")
     today_str = datetime.now(timezone.utc).strftime("%d %b %Y")
@@ -197,6 +163,8 @@ def send_individual_task_emails(report: dict) -> None:
     email_to_lower = {addr.strip().lower() for addr in Config.EMAIL_TO}
     quality_gate_state = Config.EMAIL_QUALITY_GATE_STATE.strip().lower()
     good_threshold = Config.EMAIL_GOOD_QUALITY_THRESHOLD
+    # Always include the quality gate state so it isn't dropped before
+    # reaching the quality check — it has its own stricter rule.
     notify_states = {s.strip().lower() for s in Config.EMAIL_NOTIFY_STATES} | {quality_gate_state}
 
     sent_count = 0
@@ -206,10 +174,12 @@ def send_individual_task_emails(report: dict) -> None:
 
     for task in flagged_tasks:
         task_state = task.get("state", "").strip().lower()
-        quality_score = task["analysis"].get("quality_score", 0)
-        has_comment = task["analysis"].get("has_comment_today", False)
+        analysis = task["analysis"]
+        quality_score = analysis.get("quality_score", 0)
+        has_comment = analysis.get("has_comment_today", False)
+        copy_pasted = analysis.get("copy_paste_detected", False)
 
-        # ── State filter: skip states not in EMAIL_NOTIFY_STATES ──────────
+        # ── State filter ──────────────────────────────────────────────────
         if task_state not in notify_states:
             logger.info(
                 "Task #%d ('%s') state '%s' not in EMAIL_NOTIFY_STATES %s — skipping.",
@@ -218,25 +188,34 @@ def send_individual_task_emails(report: dict) -> None:
             skipped_state += 1
             continue
 
-        # ── Quality gate: only applies to EMAIL_QUALITY_GATE_STATE ────────
+        # ── Quality gate: only for EMAIL_QUALITY_GATE_STATE ───────────────
         if task_state == quality_gate_state:
-            if has_comment and quality_score >= good_threshold:
+            # Email is suppressed only when comment exists, is not copy-pasted,
+            # and scores at or above the good threshold.
+            comment_is_good = (
+                has_comment
+                and not copy_pasted
+                and quality_score >= good_threshold
+            )
+            if comment_is_good:
                 logger.info(
-                    "Task #%d ('%s') [%s] quality score %d/10 meets threshold %d — "
+                    "Task #%d ('%s') [%s] quality score %d/10, not copy-pasted — "
                     "comment is good enough, skipping individual email.",
-                    task["id"], task["title"], task.get("state"),
-                    quality_score, good_threshold,
+                    task["id"], task["title"], task.get("state"), quality_score,
                 )
                 skipped_good_quality += 1
                 continue
             else:
-                reason = (
-                    f"quality score {quality_score}/10 below threshold {good_threshold}"
-                    if has_comment else "no comment today"
-                )
+                reasons = []
+                if not has_comment:
+                    reasons.append("no comment today")
+                elif copy_pasted:
+                    reasons.append(f"copy-pasted comment (score {quality_score}/10)")
+                elif quality_score < good_threshold:
+                    reasons.append(f"quality score {quality_score}/10 below threshold {good_threshold}")
                 logger.info(
                     "Task #%d ('%s') [%s] — sending individual email (%s).",
-                    task["id"], task["title"], task.get("state"), reason,
+                    task["id"], task["title"], task.get("state"), ", ".join(reasons),
                 )
 
         # ── Assignee email check ───────────────────────────────────────────
@@ -258,7 +237,7 @@ def send_individual_task_emails(report: dict) -> None:
             )
             continue
 
-        # ── Send ──────────────────────────────────────────────────────────
+        # ── Build and send ────────────────────────────────────────────────
         html_body = _render_task_html(report, task)
 
         subject = (
@@ -274,10 +253,15 @@ def send_individual_task_emails(report: dict) -> None:
         )
         if not has_comment:
             plain += "No EOD comment was added today.\n\n"
+        elif copy_pasted:
+            plain += (
+                f"Today's comment appears identical to a recent one (score {quality_score}/10). "
+                "Please add a meaningful update describing what actually changed today.\n\n"
+            )
         elif quality_score < good_threshold:
             plain += (
                 f"Today's comment scored {quality_score}/10 — "
-                f"a more detailed update would help the team track progress.\n\n"
+                "a more specific update (what was done, what remains, any risks) would help.\n\n"
             )
         if task.get("nudge"):
             plain += f"Suggested next step: {task['nudge']['message']}\n\n"
