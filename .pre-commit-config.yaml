@@ -1,0 +1,10 @@
+# Gap addressed: "Security & Secrets" (High) — guards against committing
+# real PATs/tokens/passwords by accident. Install with:
+#   pip install -r requirements-dev.txt
+#   pre-commit install
+repos:
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
